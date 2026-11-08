@@ -11,21 +11,334 @@ export async function getDatabase() {
 
   return db;
 }
+// Cerrar la conexión actual de la base de datos.
+export async function cerrarDatabase() {
+  if (db !== null) {
+    await db.closeAsync();
+    db = null;
+  }
+}
 
-// Crear una copia de seguridad de la base de datos.
-export async function crearRespaldoBaseDatos() {
+// Restaurar una copia de seguridad de la base de datos.
+export async function restaurarBaseDatos(rutaArchivo: string): Promise<void> {
+  const FileSystem = await import("expo-file-system/legacy");
+
+  if (
+    !rutaArchivo.startsWith("file://") &&
+    !rutaArchivo.startsWith("content://")
+  ) {
+    throw new Error("La ubicación del archivo seleccionado no es válida.");
+  }
+  if (!FileSystem.cacheDirectory || !FileSystem.documentDirectory) {
+    throw new Error("No se encontraron las carpetas necesarias.");
+  }
+
+  const identificador = Date.now();
+
+  const nombreArchivoSeleccionado = `control-estudiantes-seleccionado-${identificador}.db`;
+
+  const nombreRespaldoAnterior = `control-estudiantes-recuperacion-${identificador}.db`;
+
+  const rutaSeleccionada =
+    FileSystem.cacheDirectory + nombreArchivoSeleccionado;
+
+  const rutaRespaldoAnterior =
+    FileSystem.documentDirectory + nombreRespaldoAnterior;
+
+  let origen: SQLite.SQLiteDatabase | null = null;
+  let respaldoAnterior: SQLite.SQLiteDatabase | null = null;
+  let destino: SQLite.SQLiteDatabase | null = null;
+
+  let respaldoCreado = false;
+  let restauracionIniciada = false;
+  let preservarRespaldo = false;
+
+  // Comprobar que una base de datos tenga la estructura necesaria.
+  async function comprobarBaseDatos(
+    database: SQLite.SQLiteDatabase,
+    comprobarConfiguracion = false,
+  ) {
+    const comprobacion = await database.getFirstAsync<{
+      quick_check: string;
+    }>("PRAGMA quick_check");
+
+    if (comprobacion?.quick_check !== "ok") {
+      throw new Error("La base de datos está dañada o no es válida.");
+    }
+
+    const tablasNecesarias = [
+      "catedras",
+      "catedra_dias",
+      "estudiantes",
+      "asistencias",
+    ];
+
+    for (const tabla of tablasNecesarias) {
+      const columnas = await database.getAllAsync<{
+        name: string;
+      }>(`PRAGMA table_info(${tabla})`);
+
+      if (columnas.length === 0) {
+        throw new Error(`La copia no contiene la tabla necesaria: ${tabla}.`);
+      }
+
+      const nombresColumnas = columnas.map((columna) => columna.name);
+
+      const columnasEsperadas: Record<string, string[]> = {
+        catedras: ["id", "nombre", "fecha_creacion"],
+        catedra_dias: ["catedra_id", "dia_semana"],
+        estudiantes: [
+          "id",
+          "catedra_id",
+          "nombre",
+          "segundo_nombre",
+          "apellido",
+          "segundo_apellido",
+          "leccion_actual",
+        ],
+        asistencias: ["id", "estudiante_id", "fecha", "estado", "leccion"],
+      };
+
+      for (const columna of columnasEsperadas[tabla]) {
+        if (!nombresColumnas.includes(columna)) {
+          throw new Error(
+            `La copia tiene una estructura incompatible en la tabla ${tabla}.`,
+          );
+        }
+      }
+
+      if (comprobarConfiguracion && tabla === "catedras") {
+        const configuraciones = [
+          "control_lecciones",
+          "leccion_inicial",
+          "leccion_final",
+        ];
+
+        for (const columna of configuraciones) {
+          if (!nombresColumnas.includes(columna)) {
+            throw new Error(`No se encontró la configuración ${columna}.`);
+          }
+        }
+      }
+    }
+
+    const erroresRelaciones = await database.getAllAsync(
+      "PRAGMA foreign_key_check",
+    );
+
+    if (erroresRelaciones.length > 0) {
+      throw new Error(
+        "La base de datos contiene problemas en las relaciones entre sus registros.",
+      );
+    }
+  }
+
+  try {
+    // Copiar el archivo seleccionado a una ubicación controlada.
+    await FileSystem.copyAsync({
+      from: rutaArchivo,
+      to: rutaSeleccionada,
+    });
+
+    // Abrir la copia seleccionada desde su carpeta temporal.
+    origen = await SQLite.openDatabaseAsync(
+      nombreArchivoSeleccionado,
+      {},
+      FileSystem.cacheDirectory,
+    );
+
+    // Validar el archivo antes de modificar la base actual.
+    await comprobarBaseDatos(origen);
+
+    // Obtener la conexión actual.
+    const baseActual = await getDatabase();
+
+    // Crear una copia de seguridad persistente de los datos actuales.
+    respaldoAnterior = await SQLite.openDatabaseAsync(
+      nombreRespaldoAnterior,
+      {},
+      FileSystem.documentDirectory,
+    );
+
+    await SQLite.backupDatabaseAsync({
+      sourceDatabase: baseActual,
+      sourceDatabaseName: "main",
+      destDatabase: respaldoAnterior,
+      destDatabaseName: "main",
+    });
+
+    await respaldoAnterior.closeAsync();
+    respaldoAnterior = null;
+
+    respaldoCreado = true;
+
+    // Cerrar la conexión principal antes de restaurar.
+    await cerrarDatabase();
+
+    restauracionIniciada = true;
+
+    // Abrir nuevamente la base de datos principal.
+    destino = await SQLite.openDatabaseAsync("control-estudiantes.db");
+
+    // Restaurar la copia seleccionada.
+    await SQLite.backupDatabaseAsync({
+      sourceDatabase: origen,
+      sourceDatabaseName: "main",
+      destDatabase: destino,
+      destDatabaseName: "main",
+    });
+
+    await destino.closeAsync();
+    destino = null;
+
+    await origen.closeAsync();
+    origen = null;
+
+    // Aplicar las migraciones necesarias.
+    await initDatabase();
+
+    // Comprobar que la base restaurada funciona.
+    const baseRestaurada = await getDatabase();
+
+    await comprobarBaseDatos(baseRestaurada, true);
+  } catch (error) {
+    // Si algo falla después de comenzar la restauración,
+    // intentar recuperar los datos anteriores.
+    if (respaldoCreado && restauracionIniciada) {
+      let copiaAnterior: SQLite.SQLiteDatabase | null = null;
+      let baseRecuperacion: SQLite.SQLiteDatabase | null = null;
+
+      try {
+        if (destino !== null) {
+          await destino.closeAsync();
+          destino = null;
+        }
+
+        await cerrarDatabase();
+
+        // Abrir la copia de seguridad anterior.
+        copiaAnterior = await SQLite.openDatabaseAsync(
+          nombreRespaldoAnterior,
+          {},
+          FileSystem.documentDirectory,
+        );
+
+        // Abrir la base principal.
+        baseRecuperacion = await SQLite.openDatabaseAsync(
+          "control-estudiantes.db",
+        );
+
+        // Recuperar los datos anteriores.
+        await SQLite.backupDatabaseAsync({
+          sourceDatabase: copiaAnterior,
+          sourceDatabaseName: "main",
+          destDatabase: baseRecuperacion,
+          destDatabaseName: "main",
+        });
+
+        await copiaAnterior.closeAsync();
+        copiaAnterior = null;
+
+        await baseRecuperacion.closeAsync();
+        baseRecuperacion = null;
+
+        // Volver a inicializar la base recuperada.
+        await initDatabase();
+
+        const baseRecuperada = await getDatabase();
+
+        await comprobarBaseDatos(baseRecuperada, true);
+      } catch {
+        preservarRespaldo = true;
+
+        throw new Error(
+          "La restauración falló y no se pudo recuperar automáticamente la base anterior. Se conservó una copia de recuperación en los archivos de la aplicación. No borres los datos de la aplicación.",
+        );
+      } finally {
+        if (copiaAnterior !== null) {
+          try {
+            await copiaAnterior.closeAsync();
+          } catch {}
+        }
+
+        if (baseRecuperacion !== null) {
+          try {
+            await baseRecuperacion.closeAsync();
+          } catch {}
+        }
+      }
+    }
+
+    throw error;
+  } finally {
+    // Cerrar las conexiones que pudieran seguir abiertas.
+    if (origen !== null) {
+      try {
+        await origen.closeAsync();
+      } catch {}
+    }
+
+    if (respaldoAnterior !== null) {
+      try {
+        await respaldoAnterior.closeAsync();
+      } catch {}
+    }
+
+    if (destino !== null) {
+      try {
+        await destino.closeAsync();
+      } catch {}
+    }
+
+    // Eliminar el archivo seleccionado que copiamos a la caché.
+    try {
+      await FileSystem.deleteAsync(rutaSeleccionada, {
+        idempotent: true,
+      });
+    } catch {}
+
+    // Eliminar la copia anterior solamente si ya no hace falta.
+    if (!preservarRespaldo) {
+      try {
+        await FileSystem.deleteAsync(rutaRespaldoAnterior, {
+          idempotent: true,
+        });
+      } catch {}
+    }
+  }
+}
+
+export async function crearRespaldoBaseDatos(): Promise<string> {
   const database = await getDatabase();
 
-  const respaldo = await SQLite.openDatabaseAsync(
-    "control-estudiantes-respaldo.db",
-  );
+  // Obtener la carpeta temporal de la aplicación.
+  const FileSystem = await import("expo-file-system/legacy");
 
-  await SQLite.backupDatabaseAsync({
-    sourceDatabase: database,
-    sourceDatabaseName: "main",
-    destDatabase: respaldo,
-    destDatabaseName: "main",
-  });
+  if (!FileSystem.cacheDirectory) {
+    throw new Error("No se encontró la carpeta temporal.");
+  }
+
+  // Crear la ubicación del archivo de respaldo.
+  const rutaRespaldo =
+    FileSystem.cacheDirectory + "control-estudiantes-respaldo.db";
+
+  // Abrir la base de datos de respaldo en esa ubicación.
+  const respaldo = await SQLite.openDatabaseAsync(rutaRespaldo);
+
+  try {
+    // Copiar toda la información de la base de datos principal.
+    await SQLite.backupDatabaseAsync({
+      sourceDatabase: database,
+      sourceDatabaseName: "main",
+      destDatabase: respaldo,
+      destDatabaseName: "main",
+    });
+
+    return rutaRespaldo;
+  } finally {
+    // Cerrar la base de datos de respaldo.
+    await respaldo.closeAsync();
+  }
 }
 
 // Actualizar las tablas para eliminar el límite fijo de 80 lecciones.
@@ -681,6 +994,98 @@ export async function obtenerInformeMensualPorCatedra(
   return informe;
 }
 
+// Obtener los días de clase programados que no tienen asistencia registrada.
+export async function obtenerClasesSinRegistroPorCatedra(
+  catedraId: number,
+  anio: number,
+  mes: number,
+): Promise<string[]> {
+  const database = await getDatabase();
+
+  // Comprobar que el año y el mes sean válidos.
+  if (
+    !Number.isInteger(anio) ||
+    anio < 1 ||
+    !Number.isInteger(mes) ||
+    mes < 1 ||
+    mes > 12
+  ) {
+    throw new Error("El año o el mes no son válidos.");
+  }
+
+  // Obtener los días de clase configurados.
+  const diasConfigurados = await obtenerDiasClaseCatedra(catedraId);
+
+  // Si no hay días configurados, no hay clases que comprobar.
+  if (diasConfigurados.length === 0) {
+    return [];
+  }
+
+  // Calcular cuántos días tiene el mes.
+  const cantidadDias = new Date(anio, mes, 0).getDate();
+
+  // Obtener la fecha actual.
+  const hoy = new Date();
+
+  const fechaHoy =
+    `${hoy.getFullYear()}-` +
+    `${String(hoy.getMonth() + 1).padStart(2, "0")}-` +
+    `${String(hoy.getDate()).padStart(2, "0")}`;
+
+  // Obtener las fechas del mes que ya han transcurrido.
+  const fechasProgramadas: string[] = [];
+
+  const nombresDias: DiaSemana[] = [
+    "Domingo",
+    "Lunes",
+    "Martes",
+    "Miércoles",
+    "Jueves",
+    "Viernes",
+    "Sábado",
+  ];
+
+  for (let dia = 1; dia <= cantidadDias; dia++) {
+    const fecha = new Date(anio, mes - 1, dia);
+
+    const nombreDia = nombresDias[fecha.getDay()];
+
+    const fechaTexto =
+      `${String(anio).padStart(4, "0")}-` +
+      `${String(mes).padStart(2, "0")}-` +
+      `${String(dia).padStart(2, "0")}`;
+
+    // No incluir fechas futuras.
+    if (diasConfigurados.includes(nombreDia) && fechaTexto <= fechaHoy) {
+      fechasProgramadas.push(fechaTexto);
+    }
+  }
+
+  // Si no hay fechas programadas que comprobar, devolver lista vacía.
+  if (fechasProgramadas.length === 0) {
+    return [];
+  }
+
+  // Obtener las fechas que ya tienen alguna asistencia registrada.
+  const registros = await database.getAllAsync<{
+    fecha: string;
+  }>(
+    `SELECT DISTINCT a.fecha
+     FROM asistencias a
+     INNER JOIN estudiantes e
+       ON e.id = a.estudiante_id
+     WHERE e.catedra_id = ?`,
+    catedraId,
+  );
+
+  const fechasRegistradas = new Set(
+    registros.map((registro) => registro.fecha),
+  );
+
+  // Devolver solamente los días programados sin asistencia.
+  return fechasProgramadas.filter((fecha) => !fechasRegistradas.has(fecha));
+}
+
 // Días de la semana permitidos.
 export type DiaSemana =
   | "Lunes"
@@ -786,4 +1191,195 @@ export async function guardarDiasClaseCatedra(
       );
     }
   });
+}
+
+// Validar que las fechas tengan el formato correcto y formen un rango válido.
+function validarRangoFechasInforme(
+  fechaInicial: string,
+  fechaFinal: string,
+): boolean {
+  const formatoFecha = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!formatoFecha.test(fechaInicial) || !formatoFecha.test(fechaFinal)) {
+    return false;
+  }
+
+  function esFechaReal(fecha: string): boolean {
+    const [anio, mes, dia] = fecha.split("-").map(Number);
+    const comprobacion = new Date(anio, mes - 1, dia);
+
+    return (
+      comprobacion.getFullYear() === anio &&
+      comprobacion.getMonth() === mes - 1 &&
+      comprobacion.getDate() === dia
+    );
+  }
+
+  return (
+    esFechaReal(fechaInicial) &&
+    esFechaReal(fechaFinal) &&
+    fechaInicial <= fechaFinal
+  );
+}
+
+// Obtener el día siguiente a una fecha.
+function obtenerDiaSiguienteInforme(fecha: string): string {
+  const [anio, mes, dia] = fecha.split("-").map(Number);
+  const siguiente = new Date(anio, mes - 1, dia);
+  siguiente.setDate(siguiente.getDate() + 1);
+
+  return (
+    `${siguiente.getFullYear()}-` +
+    `${String(siguiente.getMonth() + 1).padStart(2, "0")}-` +
+    `${String(siguiente.getDate()).padStart(2, "0")}`
+  );
+}
+
+// Obtener el informe de estudiantes entre dos fechas.
+export async function obtenerInformePorRangoFechas(
+  catedraId: number,
+  fechaInicial: string,
+  fechaFinal: string,
+) {
+  const database = await getDatabase();
+
+  if (!validarRangoFechasInforme(fechaInicial, fechaFinal)) {
+    throw new Error("El rango de fechas no es válido.");
+  }
+
+  const fechaFinalExclusiva = obtenerDiaSiguienteInforme(fechaFinal);
+
+  return await database.getAllAsync<{
+    id: number;
+    nombre: string;
+    segundo_nombre: string | null;
+    apellido: string;
+    segundo_apellido: string | null;
+    total_clases: number;
+    presentes: number;
+    ausentes: number;
+    porcentaje_asistencia: number;
+  }>(
+    `SELECT
+       e.id,
+       e.nombre,
+       e.segundo_nombre,
+       e.apellido,
+       e.segundo_apellido,
+       COUNT(a.id) AS total_clases,
+       SUM(CASE WHEN a.estado = 'P' THEN 1 ELSE 0 END) AS presentes,
+       SUM(CASE WHEN a.estado = 'A' THEN 1 ELSE 0 END) AS ausentes,
+       CASE
+         WHEN COUNT(a.id) = 0 THEN 0
+         ELSE ROUND(
+           SUM(CASE WHEN a.estado = 'P' THEN 1 ELSE 0 END)
+           * 100.0 / COUNT(a.id),
+           1
+         )
+       END AS porcentaje_asistencia
+     FROM estudiantes e
+     LEFT JOIN asistencias a
+       ON a.estudiante_id = e.id
+       AND a.fecha >= ?
+       AND a.fecha < ?
+     WHERE e.catedra_id = ?
+     GROUP BY e.id
+     ORDER BY e.id ASC`,
+    fechaInicial,
+    fechaFinalExclusiva,
+    catedraId,
+  );
+}
+
+// Obtener las clases programadas sin asistencia registrada
+// dentro de un rango de fechas.
+export async function obtenerClasesSinRegistroPorRangoFechas(
+  catedraId: number,
+  fechaInicial: string,
+  fechaFinal: string,
+): Promise<string[]> {
+  const database = await getDatabase();
+
+  if (!validarRangoFechasInforme(fechaInicial, fechaFinal)) {
+    throw new Error("El rango de fechas no es válido.");
+  }
+
+  const diasConfigurados = await obtenerDiasClaseCatedra(catedraId);
+
+  if (diasConfigurados.length === 0) {
+    return [];
+  }
+
+  const hoy = new Date();
+
+  const fechaHoy =
+    `${hoy.getFullYear()}-` +
+    `${String(hoy.getMonth() + 1).padStart(2, "0")}-` +
+    `${String(hoy.getDate()).padStart(2, "0")}`;
+
+  const nombresDias: DiaSemana[] = [
+    "Domingo",
+    "Lunes",
+    "Martes",
+    "Miércoles",
+    "Jueves",
+    "Viernes",
+    "Sábado",
+  ];
+
+  const fechasProgramadas: string[] = [];
+
+  const [anioInicial, mesInicial, diaInicial] = fechaInicial
+    .split("-")
+    .map(Number);
+
+  const fechaCursor = new Date(anioInicial, mesInicial - 1, diaInicial);
+
+  while (true) {
+    const anio = fechaCursor.getFullYear();
+    const mes = fechaCursor.getMonth() + 1;
+    const dia = fechaCursor.getDate();
+
+    const fechaTexto =
+      `${String(anio).padStart(4, "0")}-` +
+      `${String(mes).padStart(2, "0")}-` +
+      `${String(dia).padStart(2, "0")}`;
+
+    if (fechaTexto > fechaFinal || fechaTexto > fechaHoy) {
+      break;
+    }
+
+    const nombreDia = nombresDias[fechaCursor.getDay()];
+
+    if (diasConfigurados.includes(nombreDia)) {
+      fechasProgramadas.push(fechaTexto);
+    }
+
+    fechaCursor.setDate(fechaCursor.getDate() + 1);
+  }
+
+  if (fechasProgramadas.length === 0) {
+    return [];
+  }
+
+  const registros = await database.getAllAsync<{
+    fecha: string;
+  }>(
+    `SELECT DISTINCT a.fecha
+     FROM asistencias a
+     INNER JOIN estudiantes e
+       ON e.id = a.estudiante_id
+     WHERE e.catedra_id = ?
+       AND a.fecha >= ?
+       AND a.fecha <= ?`,
+    catedraId,
+    fechaInicial,
+    fechaFinal,
+  );
+
+  const fechasRegistradas = new Set(
+    registros.map((registro) => registro.fecha),
+  );
+
+  return fechasProgramadas.filter((fecha) => !fechasRegistradas.has(fecha));
 }

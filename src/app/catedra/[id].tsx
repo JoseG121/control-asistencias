@@ -84,9 +84,23 @@ export default function CatedraScreen() {
 
         <Pressable
           style={styles.button}
+          onPress={() => router.push(`/informe-rango?catedraId=${id}`)}
+        >
+          <Text style={styles.buttonText}>Informe por rango de fechas</Text>
+        </Pressable>
+
+        <Pressable
+          style={styles.button}
           onPress={() => router.push(`/configurar-dias?catedraId=${id}`)}
         >
           <Text style={styles.buttonText}>Configurar días de clase</Text>
+        </Pressable>
+
+        <Pressable
+          style={styles.button}
+          onPress={() => router.push("/respaldo")}
+        >
+          <Text style={styles.buttonText}>Copias de seguridad</Text>
         </Pressable>
 
         <Pressable style={styles.backButton} onPress={() => router.back()}>

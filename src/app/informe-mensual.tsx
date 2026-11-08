@@ -14,7 +14,10 @@ import {
 
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { obtenerInformeMensualPorCatedra } from "@/database/database";
+import {
+    obtenerClasesSinRegistroPorCatedra,
+    obtenerInformeMensualPorCatedra,
+} from "@/database/database";
 
 type ResultadoInforme = {
   id: number;
@@ -40,7 +43,11 @@ export default function InformeMensualScreen() {
   const [anio, setAnio] = useState(String(fechaActual.getFullYear()));
 
   const [informe, setInforme] = useState<ResultadoInforme[]>([]);
+
+  const [fechasSinRegistro, setFechasSinRegistro] = useState<string[]>([]);
+
   const [consultado, setConsultado] = useState(false);
+
   const [cargando, setCargando] = useState(false);
 
   async function consultarInforme() {
@@ -65,13 +72,24 @@ export default function InformeMensualScreen() {
     try {
       setCargando(true);
 
+      // Consultar el informe de asistencia.
       const resultado = await obtenerInformeMensualPorCatedra(
         Number(catedraId),
         anioNumero,
         mesNumero,
       );
 
+      // Consultar las clases programadas sin asistencia.
+      const resultadoFechas = await obtenerClasesSinRegistroPorCatedra(
+        Number(catedraId),
+        anioNumero,
+        mesNumero,
+      );
+
       setInforme(resultado);
+
+      setFechasSinRegistro(resultadoFechas);
+
       setConsultado(true);
     } catch (error) {
       console.error("Error al consultar el informe:", error);
@@ -79,6 +97,13 @@ export default function InformeMensualScreen() {
     } finally {
       setCargando(false);
     }
+  }
+
+  // Convertir una fecha YYYY-MM-DD a DD/MM/YYYY.
+  function formatearFecha(fecha: string) {
+    const [anioFecha, mesFecha, diaFecha] = fecha.split("-");
+
+    return `${diaFecha}/${mesFecha}/${anioFecha}`;
   }
 
   return (
@@ -167,6 +192,41 @@ export default function InformeMensualScreen() {
                 );
               })
             )}
+
+            {/* Sección de clases sin registro. */}
+            <View style={styles.missingSection}>
+              <Text style={styles.resultsTitle}>Clases sin registro</Text>
+
+              {fechasSinRegistro.length === 0 ? (
+                <Text style={styles.noMissingText}>
+                  No hay clases programadas pendientes de registro en este mes.
+                </Text>
+              ) : (
+                <>
+                  <Text style={styles.missingDescription}>
+                    Estas fechas estaban programadas como días de clase, pero
+                    todavía no tienen asistencia registrada.
+                  </Text>
+
+                  {fechasSinRegistro.map((fecha) => (
+                    <View key={fecha} style={styles.missingCard}>
+                      <Text style={styles.missingDate}>
+                        {formatearFecha(fecha)}
+                      </Text>
+
+                      <Text style={styles.missingStatus}>
+                        Sin registro de asistencia
+                      </Text>
+                    </View>
+                  ))}
+
+                  <Text style={styles.missingNote}>
+                    Importante: estas fechas no se cuentan automáticamente como
+                    ausencias de los estudiantes.
+                  </Text>
+                </>
+              )}
+            </View>
           </>
         )}
 
@@ -183,28 +243,33 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#F5F6FA",
   },
+
   content: {
     padding: 20,
     paddingBottom: 40,
   },
+
   title: {
     fontSize: 26,
     fontWeight: "bold",
     color: "#1F2937",
     marginBottom: 10,
   },
+
   description: {
     fontSize: 15,
     color: "#6B7280",
     marginBottom: 25,
     lineHeight: 22,
   },
+
   label: {
     fontSize: 15,
     fontWeight: "600",
     color: "#374151",
     marginBottom: 8,
   },
+
   input: {
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
@@ -214,6 +279,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 18,
   },
+
   searchButton: {
     backgroundColor: "#2563EB",
     padding: 16,
@@ -221,20 +287,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 25,
   },
+
   disabledButton: {
     opacity: 0.6,
   },
+
   buttonText: {
     color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "bold",
   },
+
   resultsTitle: {
     fontSize: 21,
     fontWeight: "bold",
     color: "#1F2937",
     marginBottom: 15,
   },
+
   studentCard: {
     backgroundColor: "#FFFFFF",
     padding: 16,
@@ -243,43 +313,101 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E5E7EB",
   },
+
   studentName: {
     fontSize: 18,
     fontWeight: "bold",
     color: "#1F2937",
     marginBottom: 5,
   },
+
   studentId: {
     fontSize: 13,
     color: "#6B7280",
     marginBottom: 12,
   },
+
   resultText: {
     fontSize: 15,
     color: "#374151",
     marginBottom: 7,
   },
+
   presentText: {
     fontSize: 15,
     color: "#15803D",
     marginBottom: 7,
   },
+
   absentText: {
     fontSize: 15,
     color: "#DC2626",
     marginBottom: 7,
   },
+
   percentageText: {
     fontSize: 17,
     fontWeight: "bold",
     color: "#2563EB",
     marginTop: 5,
   },
+
   emptyText: {
     fontSize: 15,
     color: "#6B7280",
     marginBottom: 20,
   },
+
+  missingSection: {
+    marginTop: 20,
+    padding: 16,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+  },
+
+  missingDescription: {
+    fontSize: 14,
+    color: "#64748B",
+    marginBottom: 12,
+    lineHeight: 21,
+  },
+
+  missingCard: {
+    backgroundColor: "#FEF2F2",
+    borderWidth: 1,
+    borderColor: "#FECACA",
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 10,
+  },
+
+  missingDate: {
+    fontSize: 17,
+    fontWeight: "bold",
+    color: "#991B1B",
+    marginBottom: 5,
+  },
+
+  missingStatus: {
+    fontSize: 14,
+    color: "#B91C1C",
+  },
+
+  noMissingText: {
+    fontSize: 15,
+    color: "#15803D",
+    lineHeight: 22,
+  },
+
+  missingNote: {
+    fontSize: 13,
+    color: "#64748B",
+    marginTop: 8,
+    lineHeight: 20,
+  },
+
   backButton: {
     backgroundColor: "#6B7280",
     padding: 15,

@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 
+import DateTimePicker from "@react-native-community/datetimepicker";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import {
@@ -93,8 +94,31 @@ export default function AsistenciaScreen() {
 
   const [guardando, setGuardando] = useState(false);
 
-  const [fecha] = useState(obtenerFechaActual());
-  const [diaSemana] = useState(obtenerDiaSemanaActual());
+  const [fecha, setFecha] = useState(obtenerFechaActual());
+
+  const [diaSemana, setDiaSemana] = useState(obtenerDiaSemanaActual());
+
+  const [mostrarCalendario, setMostrarCalendario] = useState(false);
+  // Actualizar la fecha y el día de la semana seleccionados.
+  function cambiarFecha(nuevaFecha: Date) {
+    const anio = nuevaFecha.getFullYear();
+    const mes = String(nuevaFecha.getMonth() + 1).padStart(2, "0");
+    const dia = String(nuevaFecha.getDate()).padStart(2, "0");
+
+    setFecha(`${anio}-${mes}-${dia}`);
+
+    const dias: DiaSemana[] = [
+      "Domingo",
+      "Lunes",
+      "Martes",
+      "Miércoles",
+      "Jueves",
+      "Viernes",
+      "Sábado",
+    ];
+
+    setDiaSemana(dias[nuevaFecha.getDay()]);
+  }
   useEffect(() => {
     async function cargarDatos() {
       try {
@@ -283,10 +307,35 @@ export default function AsistenciaScreen() {
 
         <Text style={styles.subtitle}>{catedra?.nombre}</Text>
 
-        <Text style={styles.date}>Fecha: {fecha}</Text>
+        <Pressable
+          style={styles.dateButton}
+          onPress={() => setMostrarCalendario(true)}
+        >
+          <Text style={styles.dateButtonText}>Seleccionar fecha: {fecha}</Text>
+        </Pressable>
 
         <Text style={styles.date}>Día: {diaSemana}</Text>
 
+        {mostrarCalendario && (
+          <DateTimePicker
+            value={
+              new Date(
+                Number(fecha.substring(0, 4)),
+                Number(fecha.substring(5, 7)) - 1,
+                Number(fecha.substring(8, 10)),
+              )
+            }
+            mode="date"
+            display="default"
+            onChange={(evento, fechaSeleccionada) => {
+              setMostrarCalendario(false);
+
+              if (fechaSeleccionada) {
+                cambiarFecha(fechaSeleccionada);
+              }
+            }}
+          />
+        )}
         <View style={styles.summary}>
           <Text style={styles.summaryText}>Presentes: {totalPresentes}</Text>
 
@@ -431,6 +480,20 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#64748B",
     textAlign: "center",
+  },
+  dateButton: {
+    backgroundColor: "#DBEAFE",
+    padding: 14,
+    borderRadius: 10,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#2563EB",
+  },
+
+  dateButtonText: {
+    fontSize: 16,
+    fontWeight: "bold",
+    color: "#1D4ED8",
   },
 
   summary: {
